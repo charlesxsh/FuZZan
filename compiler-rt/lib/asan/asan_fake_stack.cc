@@ -15,6 +15,7 @@
 #include "asan_allocator.h"
 #include "asan_poisoning.h"
 #include "asan_thread.h"
+#include "asan_rbtree.h"
 
 namespace __asan {
 
@@ -277,7 +278,14 @@ void __asan_alloca_poison(uptr addr, uptr size) {
 SANITIZER_INTERFACE_ATTRIBUTE
 void __asan_allocas_unpoison(uptr top, uptr bottom) {
   if ((!top) || (top > bottom)) return;
+#ifdef ENABLERBTREE
+  atreekey input;
+  input.start = reinterpret_cast<void *>(top);
+  input.end = reinterpret_cast<void *>(bottom);
+  hexasan_delete(input);
+#else
   REAL(memset)(reinterpret_cast<void*>(MemToShadow(top)), 0,
                (bottom - top) / SHADOW_GRANULARITY);
+#endif
 }
 } // extern "C"

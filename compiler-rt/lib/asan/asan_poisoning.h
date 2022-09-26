@@ -16,6 +16,7 @@
 #include "asan_internal.h"
 #include "asan_mapping.h"
 #include "sanitizer_common/sanitizer_flags.h"
+#include "sanitizer_common/asan_options.h"
 
 namespace __asan {
 
@@ -33,11 +34,15 @@ void PoisonShadowPartialRightRedzone(uptr addr,
                                      uptr redzone_size,
                                      u8 value);
 
+void PoisonShadowRBTree(uptr addr, uptr size, u8 value);
 // Fast versions of PoisonShadow and PoisonShadowPartialRightRedzone that
 // assume that memory addresses are properly aligned. Use in
 // performance-critical code with care.
 ALWAYS_INLINE void FastPoisonShadow(uptr aligned_beg, uptr aligned_size,
                                     u8 value) {
+#ifdef ENABLERBTREE
+  PoisonShadowRBTree(aligned_beg, aligned_size, value);
+#else
   DCHECK(!value || CanPoisonMemory());
   uptr shadow_beg = MEM_TO_SHADOW(aligned_beg);
   uptr shadow_end = MEM_TO_SHADOW(
@@ -73,10 +78,15 @@ ALWAYS_INLINE void FastPoisonShadow(uptr aligned_beg, uptr aligned_size,
       ReserveShadowMemoryRange(page_beg, page_end - 1, nullptr);
     }
   }
+#endif
 }
 
 ALWAYS_INLINE void FastPoisonShadowPartialRightRedzone(
     uptr aligned_addr, uptr size, uptr redzone_size, u8 value) {
+#ifdef ENABLERBTREE
+  if (redzone_size - size > 0)
+    PoisonShadowRBTree(aligned_addr + size, redzone_size - size, value);
+#else
   DCHECK(CanPoisonMemory());
   bool poison_partial = flags()->poison_partial;
   u8 *shadow = (u8*)MEM_TO_SHADOW(aligned_addr);
@@ -90,6 +100,7 @@ ALWAYS_INLINE void FastPoisonShadowPartialRightRedzone(
       *shadow = poison_partial ? static_cast<u8>(size - i) : 0;
     }
   }
+#endif
 }
 
 // Calls __sanitizer::ReleaseMemoryPagesToOS() on

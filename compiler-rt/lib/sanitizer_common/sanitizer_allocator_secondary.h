@@ -14,6 +14,7 @@
 #error This file must be included inside sanitizer_allocator.h
 #endif
 
+#include "sanitizer_common/asan_options_no_function_define.h"
 // Fixed array to store LargeMmapAllocator chunks list, limited to 32K total
 // allocated chunks. To be used in memory constrained or not memory hungry cases
 // (currently, 32 bits and internal allocator).
@@ -95,6 +96,30 @@ class LargeMmapAllocator {
     }
     uptr map_beg = reinterpret_cast<uptr>(
         MmapOrDieOnFatalError(map_size, SecondaryAllocatorName));
+
+#ifdef ENABLEHEXASAN
+#ifdef MIN_16G
+    if ((uptr)map_beg < 0x7fff00000000) {
+      return nullptr;
+    }
+#endif
+#ifdef MIN_8G
+    if ((uptr)map_beg < 0x7fff80000000) {
+      return nullptr;
+    }
+#endif
+#ifdef MIN_4G
+    if ((uptr)map_beg < 0x7fffe0000000) {
+      return nullptr;
+    }
+#endif
+#ifdef MIN_1G
+    if ((uptr)map_beg < 0x7ffff0000000) {
+      return nullptr;
+    }
+#endif
+#endif
+
     if (!map_beg)
       return nullptr;
     CHECK(IsAligned(map_beg, page_size_));

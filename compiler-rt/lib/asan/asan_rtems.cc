@@ -21,6 +21,7 @@
 #include "asan_poisoning.h"
 #include "asan_report.h"
 #include "asan_stack.h"
+#include "sanitizer_common/asan_options.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
 
@@ -30,6 +31,7 @@
 namespace __asan {
 
 static void ResetShadowMemory() {
+#ifndef ENABLEHEXASAN
   uptr shadow_start = SHADOW_OFFSET;
   uptr shadow_end = MEM_TO_SHADOW(kMyriadMemoryEnd32);
   uptr gap_start = MEM_TO_SHADOW(shadow_start);
@@ -37,6 +39,16 @@ static void ResetShadowMemory() {
 
   REAL(memset)((void *)shadow_start, 0, shadow_end - shadow_start);
   REAL(memset)((void *)gap_start, kAsanShadowGap, gap_end - gap_start);
+#endif
+#ifdef ENABLEMINSHADOW
+  uptr shadow_start = UMinShadowTable;
+  uptr shadow_end = UMinShadowTableEnd;
+  uptr gap_start = MEM_TO_SHADOW(UMinShadowTable);
+  uptr gap_end = MEM_TO_SHADOW(UMinShadowTableEnd);
+
+  REAL(memset)((void *)shadow_start, 0, shadow_end - shadow_start);
+  REAL(memset)((void *)gap_start, kAsanShadowGap, gap_end - gap_start);
+#endif
 }
 
 void InitializeShadowMemory() {

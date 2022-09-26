@@ -15,6 +15,8 @@
 #define ASAN_MAPPING_H
 
 #include "asan_internal.h"
+#include "sanitizer_common/asan_options.h"
+#include "sanitizer_common/sanitizer_allocator_internal.h"
 
 // The full explanation of the memory mapping could be found here:
 // https://github.com/google/sanitizers/wiki/AddressSanitizerAlgorithm
@@ -272,7 +274,11 @@ extern uptr kHighMemEnd, kMidMemBeg, kMidMemEnd;  // Initialized in __asan_init.
 #if SANITIZER_MYRIAD2
 #include "asan_mapping_myriad.h"
 #else
+#if defined(ENABLEMINSHADOW)
+#define MEM_TO_SHADOW(mem) (((mem) >> 3) + (UMinShadowTable)) // 1GB
+#else
 #define MEM_TO_SHADOW(mem) (((mem) >> SHADOW_SCALE) + (SHADOW_OFFSET))
+#endif
 
 #define kLowMemBeg      0
 #define kLowMemEnd      (SHADOW_OFFSET ? SHADOW_OFFSET - 1 : 0)
@@ -335,6 +341,14 @@ static inline bool AddrIsInHighShadow(uptr a) {
   return kHighMemBeg && a >= kHighShadowBeg && a <= kHighShadowEnd;
 }
 
+static inline bool AddrIsInHexASanMeta(uptr a) {
+#ifdef ENABLEMINSHADOW
+  return ((UMinShadowTable <= a) && (a <= (UMinShadowTable + MINSHADOWSIZE)));
+#else
+  return 0;
+#endif
+}
+
 static inline bool AddrIsInShadowGap(uptr a) {
   PROFILE_ASAN_MAPPING();
   if (kMidMemBeg) {
@@ -357,9 +371,13 @@ static inline bool AddrIsInShadowGap(uptr a) {
 namespace __asan {
 
 static inline bool AddrIsInMem(uptr a) {
+#if defined(ENABLEHEXASAN)
+  return !AddrIsInHexASanMeta(a);
+#else
   PROFILE_ASAN_MAPPING();
   return AddrIsInLowMem(a) || AddrIsInMidMem(a) || AddrIsInHighMem(a) ||
       (flags()->protect_shadow_gap == 0 && AddrIsInShadowGap(a));
+#endif
 }
 
 static inline uptr MemToShadow(uptr p) {
@@ -379,6 +397,12 @@ static inline bool AddrIsAlignedByGranularity(uptr a) {
 }
 
 static inline bool AddressIsPoisoned(uptr a) {
+#ifdef ENABLERBTREE
+  return hexasan_range_check(reinterpret_cast<void *>(a), 1);
+#else
+#ifdef ENABLESAMPLEING
+  sample_range_check();
+#endif
   PROFILE_ASAN_MAPPING();
   if (SANITIZER_MYRIAD2 && !AddrIsInMem(a) && !AddrIsInShadow(a))
     return false;
@@ -391,6 +415,7 @@ static inline bool AddressIsPoisoned(uptr a) {
     return (last_accessed_byte >= shadow_value);
   }
   return false;
+#endif
 }
 
 // Must be after all calls to PROFILE_ASAN_MAPPING().

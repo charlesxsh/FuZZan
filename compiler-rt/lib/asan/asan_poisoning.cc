@@ -15,6 +15,8 @@
 #include "asan_poisoning.h"
 #include "asan_report.h"
 #include "asan_stack.h"
+#include "asan_rbtree.h"
+#include "sanitizer_common/asan_options.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_flags.h"
@@ -23,15 +25,26 @@ namespace __asan {
 
 static atomic_uint8_t can_poison_memory;
 
+#ifdef ENABLERBTREE
+extern rbtree ASanTree;
+#endif
+
 void SetCanPoisonMemory(bool value) {
   atomic_store(&can_poison_memory, value, memory_order_release);
 }
 
 bool CanPoisonMemory() {
+#ifdef ENABLERBTREE
+  return true;
+#endif
   return atomic_load(&can_poison_memory, memory_order_acquire);
 }
 
 void PoisonShadow(uptr addr, uptr size, u8 value) {
+#ifdef ENABLEHEXASAN
+#ifdef ENABLERBTREE
+  FastPoisonShadow(addr, size, value);
+#else
   if (value && !CanPoisonMemory()) return;
   CHECK(AddrIsAlignedByGranularity(addr));
   CHECK(AddrIsInMem(addr));
@@ -39,16 +52,47 @@ void PoisonShadow(uptr addr, uptr size, u8 value) {
   CHECK(AddrIsInMem(addr + size - SHADOW_GRANULARITY));
   CHECK(REAL(memset));
   FastPoisonShadow(addr, size, value);
+#endif
+#else
+  if (value && !CanPoisonMemory()) return;
+  CHECK(AddrIsAlignedByGranularity(addr));
+  CHECK(AddrIsInMem(addr));
+  CHECK(AddrIsAlignedByGranularity(addr + size));
+  CHECK(AddrIsInMem(addr + size - SHADOW_GRANULARITY));
+  CHECK(REAL(memset));
+  FastPoisonShadow(addr, size, value);
+#endif
+}
+
+inline void *calc_address(uptr add, int changeVal) {
+  uptr realAddressP = add + changeVal;
+  return reinterpret_cast<void *>(realAddressP);
+}
+
+void PoisonShadowRBTree(uptr addr, uptr size, u8 value) {
+#ifdef ENABLERBTREE
+  atreekey input;
+  input.start = reinterpret_cast<void *>(addr);
+  input.end = calc_address(addr, size-1);
+  if (value != 0)
+    hexasan_insert(input);
+  else
+    hexasan_delete(input);
+#endif
 }
 
 void PoisonShadowPartialRightRedzone(uptr addr,
                                      uptr size,
                                      uptr redzone_size,
                                      u8 value) {
+#ifdef ENABLERBTREE
+  FastPoisonShadowPartialRightRedzone(addr, size, redzone_size, value);
+#else
   if (!CanPoisonMemory()) return;
   CHECK(AddrIsAlignedByGranularity(addr));
   CHECK(AddrIsInMem(addr));
   FastPoisonShadowPartialRightRedzone(addr, size, redzone_size, value);
+#endif
 }
 
 struct ShadowSegmentEndpoint {
@@ -70,6 +114,9 @@ void FlushUnneededASanShadowMemory(uptr p, uptr size) {
 }
 
 void AsanPoisonOrUnpoisonIntraObjectRedzone(uptr ptr, uptr size, bool poison) {
+#ifdef ENABLERBTREE
+  PoisonShadowRBTree(ptr, size, poison);
+#else
   uptr end = ptr + size;
   if (Verbosity()) {
     Printf("__asan_%spoison_intra_object_redzone [%p,%p) %zd\n",
@@ -88,6 +135,7 @@ void AsanPoisonOrUnpoisonIntraObjectRedzone(uptr ptr, uptr size, bool poison) {
   }
   for (; ptr < end; ptr += SHADOW_GRANULARITY)
     *(u8*)MemToShadow(ptr) = poison ? kAsanIntraObjectRedzone : 0;
+#endif
 }
 
 }  // namespace __asan
@@ -106,6 +154,9 @@ using namespace __asan;  // NOLINT
 // * if user asks to unpoison region [left, right), the program unpoisons
 // at most [AlignDown(left), right).
 void __asan_poison_memory_region(void const volatile *addr, uptr size) {
+#ifdef ENABLERBTREE
+  PoisonShadowRBTree((uptr) addr, size, 255);
+#else
   if (!flags()->allow_user_poisoning || size == 0) return;
   uptr beg_addr = (uptr)addr;
   uptr end_addr = beg_addr + size;
@@ -143,9 +194,13 @@ void __asan_poison_memory_region(void const volatile *addr, uptr size) {
   if (end.value > 0 && end.value <= end.offset) {
     *end.chunk = kAsanUserPoisonedMemoryMagic;
   }
+#endif
 }
 
 void __asan_unpoison_memory_region(void const volatile *addr, uptr size) {
+#ifdef ENABLERBTREE
+  PoisonShadowRBTree((uptr) addr, size, 0);
+#else
   if (!flags()->allow_user_poisoning || size == 0) return;
   uptr beg_addr = (uptr)addr;
   uptr end_addr = beg_addr + size;
@@ -173,6 +228,7 @@ void __asan_unpoison_memory_region(void const volatile *addr, uptr size) {
   if (end.offset > 0 && end.value != 0) {
     *end.chunk = Max(end.value, end.offset);
   }
+#endif
 }
 
 int __asan_address_is_poisoned(void const volatile *addr) {
@@ -181,6 +237,13 @@ int __asan_address_is_poisoned(void const volatile *addr) {
 
 uptr __asan_region_is_poisoned(uptr beg, uptr size) {
   if (!size) return 0;
+#ifdef ENABLERBTREE
+  return hexasan_range_check(reinterpret_cast<void *>(beg), size);
+#else
+#ifdef ENABLESAMPLEING
+  sample_range_check();
+#endif
+
   uptr end = beg + size;
   if (SANITIZER_MYRIAD2) {
     // On Myriad, address not in DRAM range need to be treated as
@@ -212,6 +275,7 @@ uptr __asan_region_is_poisoned(uptr beg, uptr size) {
       return beg;
   UNREACHABLE("mem_is_zero returned false, but poisoned byte was not found");
   return 0;
+#endif
 }
 
 #define CHECK_SMALL_REGION(p, size, isWrite)                  \
@@ -297,6 +361,9 @@ uptr __asan_load_cxx_array_cookie(uptr *p) {
 // assumes that left border of region to be poisoned is properly aligned.
 static void PoisonAlignedStackMemory(uptr addr, uptr size, bool do_poison) {
   if (size == 0) return;
+#ifdef ENABLERBTREE
+  PoisonShadowRBTree(addr, size, do_poison);
+#else
   uptr aligned_size = size & ~(SHADOW_GRANULARITY - 1);
   PoisonShadow(addr, aligned_size,
                do_poison ? kAsanStackUseAfterScopeMagic : 0);
@@ -316,6 +383,7 @@ static void PoisonAlignedStackMemory(uptr addr, uptr size, bool do_poison) {
     if (end_value != 0)
       *shadow_end = Max(end_value, end_offset);
   }
+#endif
 }
 
 void __asan_set_shadow_00(uptr addr, uptr size) {

@@ -17,6 +17,7 @@
 #include "asan_interface_internal.h"
 #include "asan_internal.h"
 #include "asan_mapping.h"
+#include "sanitizer_common/asan_options.h"
 #include "interception/interception.h"
 
 DECLARE_REAL(void*, memcpy, void *to, const void *from, uptr size)
@@ -27,6 +28,12 @@ namespace __asan {
 // Return true if we can quickly decide that the region is unpoisoned.
 // We assume that a redzone is at least 16 bytes.
 static inline bool QuickCheckForUnpoisonedRegion(uptr beg, uptr size) {
+#if defined(ENABLERBTREE)
+  return (!hexasan_range_check(reinterpret_cast<void *>(beg), size));
+#endif
+#if defined(ENABLESAMPLEING)
+  sample_range_check();
+#endif
   if (size == 0) return true;
   if (size <= 32)
     return !AddressIsPoisoned(beg) &&
@@ -50,6 +57,39 @@ struct AsanInterceptorContext {
 // that no extra frames are created, and stack trace contains
 // relevant information only.
 // We check all shadow bytes.
+
+#if defined(ENABLERBTREE)
+#define ACCESS_MEMORY_RANGE(ctx, offset, size, isWrite) do {            \
+    hexasan_range_check(offset, size);                                  \
+  } while (0)
+#elif defined(ENABLESAMPLEING)
+#define ACCESS_MEMORY_RANGE(ctx, offset, size, isWrite) do {            \
+    sample_range_check();                                               \
+    uptr __offset = (uptr)(offset);                                     \
+    uptr __size = (uptr)(size);                                         \
+    uptr __bad = 0;                                                     \
+    if (__offset > __offset + __size) {                                 \
+      GET_STACK_TRACE_FATAL_HERE;                                       \
+      ReportStringFunctionSizeOverflow(__offset, __size, &stack);       \
+    }                                                                   \
+    if (!QuickCheckForUnpoisonedRegion(__offset, __size) &&             \
+        (__bad = __asan_region_is_poisoned(__offset, __size))) {        \
+      AsanInterceptorContext *_ctx = (AsanInterceptorContext *)ctx;     \
+      bool suppressed = false;                                          \
+      if (_ctx) {                                                       \
+        suppressed = IsInterceptorSuppressed(_ctx->interceptor_name);   \
+        if (!suppressed && HaveStackTraceBasedSuppressions()) {         \
+          GET_STACK_TRACE_FATAL_HERE;                                   \
+          suppressed = IsStackTraceSuppressed(&stack);                  \
+        }                                                               \
+      }                                                                 \
+      if (!suppressed) {                                                \
+        GET_CURRENT_PC_BP_SP;                                           \
+        ReportGenericError(pc, bp, sp, __bad, isWrite, __size, 0, false);\
+      }                                                                 \
+    }                                                                   \
+  } while (0)
+#else
 #define ACCESS_MEMORY_RANGE(ctx, offset, size, isWrite) do {            \
     uptr __offset = (uptr)(offset);                                     \
     uptr __size = (uptr)(size);                                         \
@@ -75,6 +115,7 @@ struct AsanInterceptorContext {
       }                                                                 \
     }                                                                   \
   } while (0)
+#endif
 
 // memcpy is called during __asan_init() from the internals of printf(...).
 // We do not treat memcpy with to==from as a bug.

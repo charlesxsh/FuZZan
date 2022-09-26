@@ -19,6 +19,7 @@
 #define ASAN_INTERFACE_INTERNAL_H
 
 #include "sanitizer_common/sanitizer_internal_defs.h"
+#include "sanitizer_common/asan_options.h"
 
 #include "asan_init_version.h"
 
@@ -179,6 +180,11 @@ extern "C" {
 
   SANITIZER_INTERFACE_ATTRIBUTE
   extern uptr __asan_shadow_memory_dynamic_address;
+
+#ifdef ENABLEMINSHADOW
+  extern char* MinShadowTable;
+  extern uptr UMinShadowTable;
+#endif
 
   // Global flag, copy of ASAN_OPTIONS=detect_stack_use_after_return
   SANITIZER_INTERFACE_ATTRIBUTE

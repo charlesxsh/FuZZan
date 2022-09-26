@@ -21,11 +21,19 @@
 #include "asan_scariness_score.h"
 #include "asan_stack.h"
 #include "asan_thread.h"
+#include "sanitizer_common/asan_options.h"
+
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_report_decorator.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
+
+#include <string.h>
+#include <sys/shm.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
 
 namespace __asan {
 
@@ -36,6 +44,9 @@ static uptr error_message_buffer_pos = 0;
 static BlockingMutex error_message_buf_mutex(LINKER_INITIALIZED);
 static const unsigned kAsanBuggyPcPoolSize = 25;
 static __sanitizer::atomic_uintptr_t AsanBuggyPcPool[kAsanBuggyPcPoolSize];
+#ifdef ENABLEHEXASAN
+int isMemoryLeak = 0;
+#endif
 
 void AppendToErrorMessageBuffer(const char *buffer) {
   BlockingMutexLock l(&error_message_buf_mutex);
@@ -184,7 +195,15 @@ class ScopedInErrorReport {
 
     if (halt_on_error_) {
       Report("ABORTING\n");
+#ifdef ENABLEHEXASAN
+      if (isMemoryLeak) {
+        _exit(-1);
+      } else {
+        Die();
+      }
+#else
       Die();
+#endif
     }
   }
 
@@ -309,6 +328,22 @@ void ReportRssLimitExceeded(BufferedStackTrace *stack) {
 }
 
 void ReportOutOfMemory(uptr requested_size, BufferedStackTrace *stack) {
+#ifdef ENABLEHEXASAN
+  isMemoryLeak = 1;
+
+  char sharedMemStr[5000];
+  int sharedMemInt;
+
+  strncpy(sharedMemStr, getenv("SHM_STR"), 7);
+  sharedMemInt = atoi(getenv("SHM_INT"));
+  key_t key = ftok(sharedMemStr, sharedMemInt);
+
+  int shmid = shmget(key, SAMPLESIZE, 0666|IPC_CREAT);
+  uint64_t *datas = (uint64_t*) shmat(shmid, (void*) 0, 0);
+
+  datas[8] = 1;
+#endif
+
   ScopedInErrorReport in_report(/*fatal*/ true);
   ErrorOutOfMemory error(GetCurrentTidOrInvalid(), stack, requested_size);
   in_report.ReportError(error);

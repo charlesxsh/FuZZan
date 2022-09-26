@@ -16,11 +16,13 @@
 #include "asan_internal.h"
 #include "asan_mapping.h"
 #include "asan_poisoning.h"
+#include "asan_rbtree.h"
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_stats.h"
 #include "asan_suppressions.h"
 #include "asan_thread.h"
+#include "sanitizer_common/asan_options.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_mutex.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
@@ -30,6 +32,9 @@
 namespace __asan {
 
 typedef __asan_global Global;
+#if defined(ENABLESAMPLEING)
+  extern uint64_t rbtreeGlobalInsert, rbtreeGlobalDelete;
+#endif
 
 struct ListOfGlobals {
   const Global *g;
@@ -216,8 +221,11 @@ static void RegisterGlobal(const Global *g) {
     else
       CheckODRViolationViaPoisoning(g);
   }
-  if (CanPoisonMemory())
-    PoisonRedZones(*g);
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeGlobalInsert++;
+#endif
+if (CanPoisonMemory())
+  PoisonRedZones(*g);
   ListOfGlobals *l = new(allocator_for_globals) ListOfGlobals;
   l->g = g;
   l->next = list_of_all_globals;
@@ -357,7 +365,11 @@ void __asan_unregister_elf_globals(uptr *flag, void *start, void *stop) {
 void __asan_register_globals(__asan_global *globals, uptr n) {
   if (!flags()->report_globals) return;
   GET_STACK_TRACE_MALLOC;
+#ifndef DISABLELOG
   u32 stack_id = StackDepotPut(stack);
+#else
+  u32 stack_id = 0;
+#endif
   BlockingMutexLock lock(&mu_for_globals);
   if (!global_registration_site_vector) {
     global_registration_site_vector =

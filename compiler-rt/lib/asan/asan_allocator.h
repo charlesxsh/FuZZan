@@ -18,6 +18,7 @@
 #include "asan_flags.h"
 #include "asan_internal.h"
 #include "asan_interceptors.h"
+#include "sanitizer_common/asan_options.h"
 #include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_list.h"
 
@@ -144,8 +145,25 @@ const uptr kAllocatorSpace = ~(uptr)0;
 const uptr kAllocatorSize  =  0x8000000000ULL;  // 500G
 typedef DefaultSizeClassMap SizeClassMap;
 # else
+
+#if defined(ENABLEMINSHADOW)
+const uptr kAllocatorSpace = 0x000080000000ULL; // 1G
+#else
 const uptr kAllocatorSpace = 0x600000000000ULL;
+#endif
+#if defined(ENABLEMINSHADOW) || defined(ENABLERBTREE)
+#if defined(MIN_1G) || defined(ENABLERBTREE)
+const uptr kAllocatorSize  =  0x40000000ULL;  // 1G
+#elif defined(MIN_4G)
+const uptr kAllocatorSize  =  0x100000000ULL;  // 4G
+#elif defined(MIN_8G)
+const uptr kAllocatorSize  =  0x200000000ULL;  // 8G
+#elif defined(MIN_16G)
+const uptr kAllocatorSize  =  0x400000000ULL;  // 16G
+#endif
+#else
 const uptr kAllocatorSize  =  0x40000000000ULL;  // 4T.
+#endif
 typedef DefaultSizeClassMap SizeClassMap;
 # endif
 struct AP64 {  // Allocator64 parameters. Deliberately using a short name.

@@ -10,6 +10,7 @@
 // ASan runtime flags.
 //
 //===----------------------------------------------------------------------===//
+#include "sanitizer_common/asan_options.h"
 #ifndef ASAN_FLAG
 # error "Define ASAN_FLAG prior to including this file!"
 #endif
@@ -93,7 +94,11 @@ ASAN_FLAG(bool, protect_shadow_gap, !SANITIZER_RTEMS,
 ASAN_FLAG(bool, print_stats, false,
           "Print various statistics after printing an error message or if "
           "atexit=1.")
+#ifndef DISABLELOG
 ASAN_FLAG(bool, print_legend, true, "Print the legend for the shadow bytes.")
+#else
+ASAN_FLAG(bool, print_legend, false, "Print the legend for the shadow bytes.")
+#endif
 ASAN_FLAG(bool, print_scariness, false,
           "Print the scariness score. Experimental.")
 ASAN_FLAG(bool, atexit, false,
@@ -103,6 +108,18 @@ ASAN_FLAG(
     bool, print_full_thread_history, true,
     "If set, prints thread creation stacks for the threads involved in the "
     "report and their ancestors up to the main thread.")
+#ifdef ENABLERBTREE
+ASAN_FLAG(
+    bool, poison_heap, false,
+    "Poison (or not) the heap memory on [de]allocation. Zero value is useful "
+    "for benchmarking the allocator or instrumentator.")
+ASAN_FLAG(bool, poison_partial, false,
+          "If true, poison partially addressable 8-byte aligned words "
+          "(default=true). This flag affects heap and global buffers, but not "
+          "stack buffers.")
+ASAN_FLAG(bool, poison_array_cookie, false,
+          "Poison (or not) the array cookie after operator new[].")
+#else
 ASAN_FLAG(
     bool, poison_heap, true,
     "Poison (or not) the heap memory on [de]allocation. Zero value is useful "
@@ -113,7 +130,7 @@ ASAN_FLAG(bool, poison_partial, true,
           "stack buffers.")
 ASAN_FLAG(bool, poison_array_cookie, true,
           "Poison (or not) the array cookie after operator new[].")
-
+#endif
 // Turn off alloc/dealloc mismatch checker on Mac and Windows for now.
 // https://github.com/google/sanitizers/issues/131
 // https://github.com/google/sanitizers/issues/309

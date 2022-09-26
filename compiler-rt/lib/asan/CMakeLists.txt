@@ -1,6 +1,7 @@
 # Build for the AddressSanitizer runtime support library.
 
 set(ASAN_SOURCES
+  asan_rbtree.cc
   asan_allocator.cc
   asan_activation.cc
   asan_debugging.cc
@@ -39,6 +40,8 @@ set(ASAN_PREINIT_SOURCES
   asan_preinit.cc)
 
 SET(ASAN_HEADERS
+  asan_rbtree.h
+  asan_options.h
   asan_activation.h
   asan_activation_flags.inc
   asan_allocator.h
@@ -68,7 +71,7 @@ SET(ASAN_HEADERS
 
 include_directories(..)
 
-set(ASAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})
+set(ASAN_CFLAGS ${SANITIZER_COMMON_CFLAGS} -DFMODE${FUZZAN_VERSION})
 set(ASAN_COMMON_DEFINITIONS ${COMPILER_RT_ASAN_SHADOW_SCALE_DEFINITION})
 
 append_rtti_flag(OFF ASAN_CFLAGS)

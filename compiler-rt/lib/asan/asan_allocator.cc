@@ -15,12 +15,14 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "asan_rbtree.h"
 #include "asan_allocator.h"
 #include "asan_mapping.h"
 #include "asan_poisoning.h"
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_thread.h"
+#include "sanitizer_common/asan_options.h"
 #include "sanitizer_common/sanitizer_allocator_checks.h"
 #include "sanitizer_common/sanitizer_allocator_interface.h"
 #include "sanitizer_common/sanitizer_errno.h"
@@ -31,7 +33,17 @@
 #include "sanitizer_common/sanitizer_quarantine.h"
 #include "lsan/lsan_common.h"
 
+#include <string.h>
+#include <sys/shm.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
+
 namespace __asan {
+
+#if defined(ENABLESAMPLEING)
+  extern uint64_t rbtreeHeapInsert, rbtreeHeapDelete;
+#endif
 
 // Valid redzone sizes are 16, 32, 64, ... 2048, so we encode them in 3 bits.
 // We use adaptive redzones: for larger allocation larger redzones are used.
@@ -51,6 +63,9 @@ static u32 RZSize2Log(u32 rz_size) {
 
 static AsanAllocator &get_allocator();
 
+#ifdef ENABLERBTREE
+extern rbtree ASanTree;
+#endif
 // The memory chunk allocated from the underlying allocator looks like this:
 // L L L L L L H H U U U U U U R R
 //   L -- left redzone words (0 or more bytes)
@@ -458,12 +473,29 @@ struct Allocator {
     }
     if (UNLIKELY(!allocated)) {
       SetAllocatorOutOfMemory();
+#ifdef ENABLEHEXASAN
+      char sharedMemStr[5000];
+      int sharedMemInt;
+
+      strncpy(sharedMemStr, getenv("SHM_STR"), 7);
+      sharedMemInt = atoi(getenv("SHM_INT"));
+      key_t key = ftok(sharedMemStr, sharedMemInt);
+
+      int shmid = shmget(key, SAMPLESIZE, 0666|IPC_CREAT);
+      uint64_t *datas = (uint64_t*) shmat(shmid, (void*) 0, 0);
+
+      datas[8] = 1;
+#endif
       if (AllocatorMayReturnNull())
         return nullptr;
       ReportOutOfMemory(size, stack);
     }
 
+#ifndef ENABLERBTREE
     if (*(u8 *)MEM_TO_SHADOW((uptr)allocated) == 0 && CanPoisonMemory()) {
+#else
+    {
+#endif
       // Heap poisoning is enabled, but the allocator provides an unpoisoned
       // chunk. This is possible if CanPoisonMemory() was false for some
       // time, for example, due to flags()->start_disabled.
@@ -507,10 +539,12 @@ struct Allocator {
     }
     m->user_requested_alignment_log = user_requested_alignment_log;
 
+#ifndef DISABLELOG
     m->alloc_context_id = StackDepotPut(*stack);
-
+#endif
     uptr size_rounded_down_to_granularity =
         RoundDownTo(size, SHADOW_GRANULARITY);
+#ifndef ENABLERBTREE
     // Unpoison the bulk of the memory region.
     if (size_rounded_down_to_granularity)
       PoisonShadow(user_beg, size_rounded_down_to_granularity, 0);
@@ -520,7 +554,9 @@ struct Allocator {
           (u8 *)MemToShadow(user_beg + size_rounded_down_to_granularity);
       *shadow = fl.poison_partial ? (size & (SHADOW_GRANULARITY - 1)) : 0;
     }
-
+#else
+    PoisonShadow(user_beg, size, 0);
+#endif
     AsanStats &thread_stats = GetCurrentThreadStats();
     thread_stats.mallocs++;
     thread_stats.malloced += size;
@@ -571,8 +607,9 @@ struct Allocator {
       CHECK_EQ(m->free_tid, kInvalidTid);
     AsanThread *t = GetCurrentThread();
     m->free_tid = t ? t->tid() : 0;
+#ifndef DISABLELOG
     m->free_context_id = StackDepotPut(*stack);
-
+#endif
     Flags &fl = *flags();
     if (fl.max_free_fill_size > 0) {
       // We have to skip the chunk header, it contains free_context_id.
@@ -819,7 +856,10 @@ AllocType AsanChunkView::GetAllocType() const {
 
 static StackTrace GetStackTraceFromId(u32 id) {
   CHECK(id);
-  StackTrace res = StackDepotGet(id);
+  StackTrace res;
+#ifndef DISABLELOG
+  res = StackDepotGet(id);
+#endif
   CHECK(res.trace);
   return res;
 }
@@ -864,23 +904,39 @@ void PrintInternalAllocatorStats() {
 }
 
 void asan_free(void *ptr, BufferedStackTrace *stack, AllocType alloc_type) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapDelete++;
+#endif
   instance.Deallocate(ptr, 0, 0, stack, alloc_type);
 }
 
 void asan_delete(void *ptr, uptr size, uptr alignment,
                  BufferedStackTrace *stack, AllocType alloc_type) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapDelete++;
+#endif
   instance.Deallocate(ptr, size, alignment, stack, alloc_type);
 }
 
 void *asan_malloc(uptr size, BufferedStackTrace *stack) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapInsert++;
+#endif
   return SetErrnoOnNull(instance.Allocate(size, 8, stack, FROM_MALLOC, true));
 }
 
 void *asan_calloc(uptr nmemb, uptr size, BufferedStackTrace *stack) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapInsert++;
+#endif
   return SetErrnoOnNull(instance.Calloc(nmemb, size, stack));
 }
 
 void *asan_realloc(void *p, uptr size, BufferedStackTrace *stack) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapInsert++;
+  rbtreeHeapDelete++;
+#endif
   if (!p)
     return SetErrnoOnNull(instance.Allocate(size, 8, stack, FROM_MALLOC, true));
   if (size == 0) {
@@ -895,11 +951,17 @@ void *asan_realloc(void *p, uptr size, BufferedStackTrace *stack) {
 }
 
 void *asan_valloc(uptr size, BufferedStackTrace *stack) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapInsert++;
+#endif
   return SetErrnoOnNull(
       instance.Allocate(size, GetPageSizeCached(), stack, FROM_MALLOC, true));
 }
 
 void *asan_pvalloc(uptr size, BufferedStackTrace *stack) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapInsert++;
+#endif
   uptr PageSize = GetPageSizeCached();
   if (UNLIKELY(CheckForPvallocOverflow(size, PageSize))) {
     errno = errno_ENOMEM;
@@ -915,6 +977,9 @@ void *asan_pvalloc(uptr size, BufferedStackTrace *stack) {
 
 void *asan_memalign(uptr alignment, uptr size, BufferedStackTrace *stack,
                     AllocType alloc_type) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapInsert++;
+#endif
   if (UNLIKELY(!IsPowerOfTwo(alignment))) {
     errno = errno_EINVAL;
     if (AllocatorMayReturnNull())
@@ -926,6 +991,9 @@ void *asan_memalign(uptr alignment, uptr size, BufferedStackTrace *stack,
 }
 
 void *asan_aligned_alloc(uptr alignment, uptr size, BufferedStackTrace *stack) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapInsert++;
+#endif
   if (UNLIKELY(!CheckAlignedAllocAlignmentAndSize(alignment, size))) {
     errno = errno_EINVAL;
     if (AllocatorMayReturnNull())
@@ -938,6 +1006,9 @@ void *asan_aligned_alloc(uptr alignment, uptr size, BufferedStackTrace *stack) {
 
 int asan_posix_memalign(void **memptr, uptr alignment, uptr size,
                         BufferedStackTrace *stack) {
+#if defined(Dynamic_metadata_MODE1)
+  rbtreeHeapInsert++;
+#endif
   if (UNLIKELY(!CheckPosixMemalignAlignment(alignment))) {
     if (AllocatorMayReturnNull())
       return errno_EINVAL;

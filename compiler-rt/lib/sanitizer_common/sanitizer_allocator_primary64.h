@@ -566,7 +566,7 @@ class SizeClassAllocator64 {
   }
   uptr SpaceEnd() const { return  SpaceBeg() + kSpaceSize; }
   // kRegionSize must be >= 2^32.
-  COMPILER_CHECK((kRegionSize) >= (1ULL << (SANITIZER_WORDSIZE / 2)));
+  //COMPILER_CHECK((kRegionSize) >= (1ULL << (SANITIZER_WORDSIZE / 2)));
   // kRegionSize must be <= 2^36, see CompactPtrT.
   COMPILER_CHECK((kRegionSize) <= (1ULL << (SANITIZER_WORDSIZE / 2 + 4)));
   // Call mmap for user memory with at least this size.

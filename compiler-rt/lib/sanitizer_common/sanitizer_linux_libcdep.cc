@@ -775,8 +775,8 @@ INLINE bool CanUseVDSO() {
   // Bionic is safe, it checks for the vDSO function pointers to be initialized.
   if (SANITIZER_ANDROID)
     return true;
-  if (&__progname && __progname && *__progname)
-    return true;
+  //if (&__progname && __progname && *__progname)
+  //  return true;
   return false;
 }
 

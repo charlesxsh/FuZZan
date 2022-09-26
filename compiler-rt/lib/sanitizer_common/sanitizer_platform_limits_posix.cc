@@ -1158,7 +1158,7 @@ CHECK_SIZE_AND_OFFSET(ipc_perm, uid);
 CHECK_SIZE_AND_OFFSET(ipc_perm, gid);
 CHECK_SIZE_AND_OFFSET(ipc_perm, cuid);
 CHECK_SIZE_AND_OFFSET(ipc_perm, cgid);
-#if !defined(__aarch64__) || !SANITIZER_LINUX || __GLIBC_PREREQ (2, 21)
+#if !SANITIZER_LINUX || __GLIBC_PREREQ (2, 31)
 /* On aarch64 glibc 2.20 and earlier provided incorrect mode field.  */
 CHECK_SIZE_AND_OFFSET(ipc_perm, mode);
 #endif

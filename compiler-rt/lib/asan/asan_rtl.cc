@@ -24,6 +24,7 @@
 #include "asan_stats.h"
 #include "asan_suppressions.h"
 #include "asan_thread.h"
+#include "asan_rbtree.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_libc.h"
@@ -32,11 +33,85 @@
 #include "ubsan/ubsan_init.h"
 #include "ubsan/ubsan_platform.h"
 
-uptr __asan_shadow_memory_dynamic_address;  // Global interface symbol.
+#include <stdio.h>
+#include <string.h>
+#include <inttypes.h>
+#include <execinfo.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#ifdef ENABLESAMPLEING
+#include<stdlib.h>
+#include<sys/ipc.h>
+#include<sys/shm.h>
+#endif
+
+uptr __asan_shadow_memory_dynamic_address = 0;  // Global interface symbol.
 int __asan_option_detect_stack_use_after_return;  // Global interface symbol.
 uptr *__asan_test_only_reported_buggy_pointer;  // Used only for testing asan.
 
+#ifdef ENABLEMINSHADOW
+__attribute__((visibility("default"))) char *MinShadowTable = NULL;
+__attribute__((visibility("default"))) char *MinShadowTableInit = NULL;
+__attribute__((visibility("default"))) uptr UMinShadowTable;
+__attribute__((visibility("default"))) uptr UMinShadowTableEnd;
+#endif
+
 namespace __asan {
+
+#if defined(ENABLESAMPLEING)
+uint64_t RangeCheck = 0, SingleCheck = 0;
+uint64_t rbtreeInsert = 0, rbtreeDelete = 0, rbtreeLookup = 0;
+uint64_t rbtreeStackInsert = 0, rbtreeStackDelete = 0;
+uint64_t rbtreeGlobalInsert = 0, rbtreeGlobalDelete = 0;
+uint64_t rbtreeHeapInsert = 0, rbtreeHeapDelete = 0;
+#endif
+
+#ifdef ENABLERBTREE
+class rbtree_control {
+ public:
+  rbtree_control() {
+    __asan::checkStart = true;
+  }
+
+  ~rbtree_control() {
+    __asan::checkStart = false;
+  }
+};
+
+static rbtree_control RBtreeControl;
+#endif
+
+#ifdef ENABLESAMPLEING
+class samplingInit {
+ public:
+  samplingInit() {
+  }
+
+  ~samplingInit() {
+    key_t key = ftok(getenv("SHM_STR"), atoi(getenv("SHM_INT")));
+
+    int shmid = shmget(key, SAMPLESIZE, 0666|IPC_CREAT);
+    uint64_t *datas = (uint64_t*) shmat(shmid, (void*) 0, 0);
+    ++datas[0];
+#ifdef Dynamic_metadata_MODE1
+    datas[1] += (RangeCheck + SingleCheck + rbtreeInsert + rbtreeDelete);
+#endif
+    shmdt(datas);
+  }
+};
+
+static samplingInit SamplingInit;
+#endif
+
+#ifdef ENABLEPERRBTREE
+__attribute__((visibility("default"))) rbtree_type **TopRBTree;
+#endif
+
+#ifdef ENABLERBTREE
+rbtree ASanTree = NULL;
+bool checkStart = false;
+#endif
 
 uptr AsanMappingProfile[kAsanMappingProfileSize];
 
@@ -245,6 +320,161 @@ void __asan_storeN_noabort(uptr addr, uptr size) {
   }
 }
 
+#if defined(ENABLEHEXASAN)
+inline int get_min(int a, int b) {
+  if (a < b) return a;
+  else
+    return b;
+}
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __asan_stack_hexasan_insert(uptr addr, uptr size) {
+#ifdef ENABLERBTREE
+  atreekey input;
+  input.start = reinterpret_cast<void *>(addr);
+  input.end = reinterpret_cast<void *>(addr + size - 1);
+  hexasan_insert(input);
+#endif
+}
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __asan_stack_hexasan_delete_rbtree_add(uptr addr, uptr size) {
+#ifdef ENABLERBTREE
+  atreekey input;
+  input.start = reinterpret_cast<void *>(addr);
+  input.end = reinterpret_cast<void *>(addr + size - 1);
+  hexasan_delete(input);
+#endif
+}
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __asan_stack_hexasan_delete(uptr addr, uptr size) {
+#ifdef ENABLERBTREE
+  atreekey input;
+  input.start = reinterpret_cast<void *>(addr);
+  input.end = reinterpret_cast<void *>(addr + size - 1);
+  hexasan_delete(input);
+#endif
+}
+
+#ifdef ENABLERBTREE
+void verify_access(void *addr, int TypeSize) {
+  uptr targetAddr = (uptr)addr + TypeSize - 1;
+
+  node n = nullptr;
+  if (ASanTree) {
+    node nTemp = ASanTree->root;
+    while (nTemp != NULL) {
+      if ((uptr)nTemp->key.end < targetAddr)
+        nTemp = nTemp->right;
+      else if ((uptr)nTemp->key.start > targetAddr)
+        nTemp = nTemp->left;
+      else if (((uptr)nTemp->key.start <= targetAddr) &&
+               targetAddr <= (uptr)nTemp->key.end) {
+        n = nTemp;
+        break;
+      } else
+        break;
+    }
+  }
+  if (n == nullptr) {
+    return;
+  }
+
+#ifdef PRINT_CHECK_RESULT
+    Printf("\t Single Memory safety violation %p\n", addr);
+#endif
+#ifdef TERMINATE_PROGRAM
+    Die();
+#endif
+    return;
+}
+#else
+void verify_access(void *addr, int MapIndex) {
+}
+#endif
+
+inline void *calc_address(void *add, int changeVal) {
+  uptr p = reinterpret_cast<uptr>(add);
+  uptr realAddressP = p + changeVal;
+  return reinterpret_cast<void *>(realAddressP);
+}
+
+#define CHECK_SMALL_REGION(p, size, isWrite)                  \
+  do {                                                        \
+    uptr __p = reinterpret_cast<uptr>(p);                     \
+    uptr __size = size;                                       \
+    if (UNLIKELY(__asan::AddressIsPoisoned(__p) ||            \
+                 __asan::AddressIsPoisoned(__p + __size - 1))) {       \
+      GET_CURRENT_PC_BP_SP;                                   \
+      uptr __bad = __asan_region_is_poisoned(__p, __size);    \
+      __asan_report_error(pc, bp, sp, __bad, isWrite, __size, 0);\
+    }                                                         \
+  } while (false)
+
+
+#ifdef ENABLERBTREE
+#ifndef INLINE_OPT
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __asan_safety_check(void *addr, int typeSize) {
+#ifdef DISABLE_META
+  return;
+#endif
+  if ((addr == nullptr) || !checkStart) return;
+
+  verify_access(addr, typeSize);
+}
+#endif
+#endif
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __asan_safety_hit(void *addr) {
+}
+
+#ifdef INLINE_OPT
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __asan_safety_check(void *addr, int MapIndex) {
+#ifdef DISABLE_META
+  return;
+#endif
+  if (MapIndex < 0 || MapIndex > MAXCACHESIZE) {
+    return;
+  }
+
+  verify_access(addr, MapIndex);
+}
+#endif
+#endif
+
+#if defined(ENABLESAMPLEING)
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __sample_safety_check() {
+#if (defined(Dynamic_metadata_MODE1))
+  SingleCheck++;
+#endif
+}
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __sample_stack_insert() {
+  rbtreeStackInsert++;
+}
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __sample_stack_delete() {
+  rbtreeStackDelete++;
+}
+
+#endif
+
 // Force the linker to keep the symbols for various ASan interface functions.
 // We want to keep those in the executable in order to let the instrumented
 // dynamic libraries access the symbol even if it is not used by the executable
@@ -304,6 +534,62 @@ static NOINLINE void force_interface_symbols() {
   // clang-format on
 }
 
+#ifdef ENABLEHEXASAN
+static void FuZZan_init() {
+
+// RBTREE mode init
+#ifdef ENABLERBTREE
+  ASanTree = rbtree_create();
+#endif
+
+// min shadow memory init
+#ifdef ENABLEMINSHADOW
+  #if defined(MIN_1G)
+  const uptr TOTALSIZE_INIT = 0x2000000;
+  const uptr MINSHADOWSTART_INIT = 0x10010E000000ULL;
+  const uptr MINSHADOWSTART = 0x000110000000ULL;
+  const uptr MINSIZE = 0x22000000;
+  const uptr TOTALSIZE = 0x26400000;
+#elif defined(MIN_4G)
+  const uptr TOTALSIZE_INIT = 0x4000000;
+  const uptr MINSHADOWSTART_INIT = 0x1001C6000000ULL;
+  const uptr MINSHADOWSTART = 0x0001CA000000ULL;
+  const uptr MINSIZE = 0x39400000;
+  const uptr TOTALSIZE = 0x40680000;
+#elif defined(MIN_8G)
+  const uptr TOTALSIZE_INIT = 0x10000000;
+  const uptr MINSHADOWSTART_INIT = 0x1002BA000000ULL;
+  const uptr MINSHADOWSTART = 0x0002CA000000ULL;
+  const uptr MINSIZE = 0x59400000;
+  const uptr TOTALSIZE = 0x64680000;
+#elif defined(MIN_16G)
+  const uptr TOTALSIZE_INIT = 0x20000000;
+  const uptr MINSHADOWSTART_INIT = 0x1004AA000000ULL;
+  const uptr MINSHADOWSTART = 0x0004CA000000ULL;
+  const uptr MINSIZE = 0x99400000;
+  const uptr TOTALSIZE = 0xAC680000;
+#endif
+  MinShadowTable = (char *) mmap((void*) MINSHADOWSTART, TOTALSIZE, PROT_READ |
+                                 PROT_WRITE, MAP_PRIVATE |
+                                 MAP_ANONYMOUS, -1, 0);
+
+  MinShadowTableInit = (char *) mmap((void*) MINSHADOWSTART_INIT,
+                                     TOTALSIZE_INIT, PROT_READ |
+                                     PROT_WRITE, MAP_PRIVATE |
+                                     MAP_ANONYMOUS, -1, 0);
+
+  __asan_shadow_memory_dynamic_address = reinterpret_cast<uptr>(MinShadowTable);
+  UMinShadowTable = __asan_shadow_memory_dynamic_address;
+  UMinShadowTableEnd = UMinShadowTable + MINSIZE - 1;
+
+  uptr gap_start = MEM_TO_SHADOW(UMinShadowTable);
+  uptr gap_end = MEM_TO_SHADOW(UMinShadowTableEnd);
+
+  ProtectGap(gap_start, (gap_end - gap_start));
+#endif
+}
+#endif
+
 static void asan_atexit() {
   Printf("AddressSanitizer exit stats:\n");
   __asan_print_accumulated_stats();
@@ -322,7 +608,9 @@ static void InitializeHighMemEnd() {
   // aligned together with kHighMemBeg:
   kHighMemEnd |= SHADOW_GRANULARITY * GetMmapGranularity() - 1;
 #endif  // !ASAN_FIXED_MAPPING
+#ifndef ENABLEHEXASAN
   CHECK_EQ((kHighMemBeg % GetMmapGranularity()), 0);
+#endif
 #endif  // !SANITIZER_MYRIAD2
 }
 
@@ -438,8 +726,11 @@ static void AsanInitInternal() {
 
   DisableCoreDumperIfNecessary();
 
+#ifdef ENABLEHEXASAN
+  FuZZan_init();
+#else
   InitializeShadowMemory();
-
+#endif
   AsanTSDInit(PlatformTSDDtor);
   InstallDeadlySignalHandlers(AsanOnDeadlySignal);
 
@@ -560,6 +851,9 @@ void NOINLINE __asan_handle_no_return() {
     if (reported_warning)
       return;
     reported_warning = true;
+
+    //TODO(Jeon): enable later
+    return;
     Report("WARNING: ASan is ignoring requested __asan_handle_no_return: "
            "stack top: %p; bottom %p; size: %p (%zd)\n"
            "False positive error reports may follow\n"
@@ -587,3 +881,13 @@ void __asan_init() {
 void __asan_version_mismatch_check() {
   // Do nothing.
 }
+
+#if defined(ENABLESAMPLEING)
+using namespace __asan;
+
+void sample_range_check() {
+#if (defined(Dynamic_metadata_MODE1))
+  RangeCheck++;
+#endif
+}
+#endif

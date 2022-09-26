@@ -74,6 +74,7 @@ void NORETURN ShowStatsAndAbort();
 
 // asan_shadow_setup.cc
 void InitializeShadowMemory();
+void ProtectGap(uptr addr, uptr size);
 
 // asan_malloc_linux.cc / asan_malloc_mac.cc
 void ReplaceSystemMalloc();
