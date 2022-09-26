@@ -1,0 +1,4 @@
+llvm/*
+compiler-rt/*
+!compiler-rt/lib
+!llvm/lib/Transforms/Instrumentation
